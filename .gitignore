@@ -10,4 +10,5 @@ venv
 # ignoring files & folders created by export
 *.csv
 *.zip
+attachments/
 */

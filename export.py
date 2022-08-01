@@ -56,17 +56,38 @@ def export_mailboxes(mailboxes_id, endpoint_headers, start_page, end_page, inclu
         if not os.path.exists(mailbox_id+'/'):
             os.makedirs(mailbox_id+'/')
 
-        # Creates our file, or rewrites it if one is present.
+        # Read if there is an existing export file
+        if os.path.exists(f"{mailbox_id}.csv"):
+            # If so, open it, read the first entry.
+            with open(f"{mailbox_id}.csv", mode="r", newline='', encoding='utf-8') as orig_f:
+                csv_reader = csv.reader(orig_f)
+                next(csv_reader)
+                first_row = next(csv_reader)
+                last_conversation_id = int(first_row[0])
+
+                # Then save the whole thing to a new file
+                # on completion, add the existing entries to the new file.
+                # we will rewrite over the original file when creating the export
+                with open(f"{mailbox_id}-tmp.csv", mode="w", newline='', encoding='utf-8') as tmp_f:
+                    orig_f.seek(0)
+                    tmp_f.write(orig_f.read())
+
+        else:
+            last_conversation_id = 0
+
+        print(f"Last conversation ID: {last_conversation_id}")
+
+        # Creates our file, or opens existing to prepend entries
         with open(str(mailbox_id)+'.csv', mode="w", newline='', encoding='utf-8') as fh:
+
             # Define our columns.
-            columns = ['ID', 'Customer Name', 'Customer email addresses', 'Assignee', 'Status', 'Subject', 'Preview', 'Tags', 'Custom Fields', 'Created At',
-                    'Closed At', 'Closed By', 'Resolution Time (seconds)']  
+            columns = ['ID', 'Customer Name', 'Customer email addresses', 'Assignee', 'Status', 'Subject', 'Preview', 'Tags', 'Custom Fields', 'Created At', 'Closed At', 'Closed By', 'Resolution Time (seconds)']  
             csv_writer = csv.DictWriter(fh, fieldnames=columns) # Create our writer object.
             csv_writer.writeheader() # Write our header row.
             
             while not all_conversations:
                 # Prepare conversations endpoint with status of conversations we want and the mailbox.
-                conversations_endpoint = 'https://api.helpscout.net/v2/conversations?status=all&mailbox={}&page={}'.format(
+                conversations_endpoint = 'https://api.helpscout.net/v2/conversations?status=all&mailbox={}&page={}&embed=threads'.format(
                     mailbox_id,
                     page
                 )
@@ -74,11 +95,28 @@ def export_mailboxes(mailboxes_id, endpoint_headers, start_page, end_page, inclu
                 r = requests.get(conversations_endpoint, headers=endpoint_headers)
 
                 conversations = r.json()
+
                 print(f"Total Pages {conversations['page']['totalPages']}")
 
                 # Cycle over conversations in response.
                 for conversation in conversations['_embedded']['conversations']:
                     print(conversation['id'])
+
+                    # If we've reached the conversation from the start of our existing export file, stop exporting
+                    if last_conversation_id == conversation['id']:
+                        print(f"Reached already exported conversations.  Finishing... {last_conversation_id}")
+                        all_conversations = True
+
+                        # Save previous entries (from tmp file) to end of file
+                        with open(f"{mailbox_id}-tmp.csv", mode="r", newline='', encoding='utf-8') as tmp_f:
+                            csv_reader = csv.reader(tmp_f)
+                            # Skip header
+                            next(csv_reader)
+                            for row in csv_reader:
+                                csv_writer.writerow(dict(zip(columns, row)))
+
+                        break
+
                     # If the email is missing, we won't keep this conversation.
                     # Depending on what you will be using this data for,
                     # You might omit this.
@@ -86,6 +124,7 @@ def export_mailboxes(mailboxes_id, endpoint_headers, start_page, end_page, inclu
                         print('Missing email for {}'.format(customer_name))
                         continue
 
+                    ## CSV File Column & Row Assignment
                     # Prepare customer name.
                     customer_name = '{} {}'.format(
                         conversation['primaryCustomer']['first'],
@@ -128,14 +167,12 @@ def export_mailboxes(mailboxes_id, endpoint_headers, start_page, end_page, inclu
                         'Resolution Time (seconds)': resolution_time
                     })
 
-                    # Threads
-                    thread_endpoint = 'https://api.helpscout.net/v2/conversations/{}/threads'.format(
-                        conversation['id']
-                    )
-                    r = requests.get(thread_endpoint, headers=endpoint_headers)
-                    threads = r.json()['_embedded']['threads']
+                    ## Save threads as HTML files in directory
+                    threads = conversation['_embedded']['threads']
                     body = '<html><body>'
                     for thread in threads:
+                        ## Function for handling attachments
+                        ## Suggest using the new attachment export function instead of this
                         if include_attachments==True:  
                             # Handle attachments
                             if 'attachments' in thread["_embedded"].keys():
@@ -164,14 +201,88 @@ def export_mailboxes(mailboxes_id, endpoint_headers, start_page, end_page, inclu
                             exit()
 
 
+
+
+def export_attachments_only(mailboxes_id, endpoint_headers, start_page, end_page):
+    print(f"Starting on page {start_page}")
+    print(f"Ending on page {end_page}")
+
+    for mailbox_id in mailboxes_id.split(','): 
+        print(mailbox_id)
+
+    for mailbox_id in mailboxes_id.split(','): 
+        all_conversations = False
+        page = start_page if start_page else 1
+        if not os.path.exists('attachments/'):
+            os.makedirs('attachments/')
+            
+        while not all_conversations:
+            # Prepare conversations endpoint with status of conversations we want and the mailbox.
+            conversations_endpoint = 'https://api.helpscout.net/v2/conversations?status=all&mailbox={}&page={}&embed=threads'.format(
+                mailbox_id,
+                page
+            )
+
+            r = requests.get(conversations_endpoint, headers=endpoint_headers)
+
+            conversations = r.json()
+
+            print(f"Total Pages {conversations['page']['totalPages']}")
+
+            # Cycle over conversations in response.
+            for conversation in conversations['_embedded']['conversations']:
+                print(conversation['id'])
+                # If the email is missing, we won't keep this conversation.
+                # Depending on what you will be using this data for,
+                # You might omit this.
+                if 'email' not in conversation['primaryCustomer']:
+                    print('Missing email for {}'.format(conversation['id']))
+                    continue
+
+                threads = conversation['_embedded']['threads']
+
+                for thread in threads:
+                    if thread['_embedded']['attachments']:
+                        print(f"Attachment(s) found for {conversation['primaryCustomer']['email']}")
+                        # Download the attachment(s)
+                        for attachment in thread["_embedded"]["attachments"]:
+                            # If it doesn't exist, download it
+                            if not os.path.exists(f"attachments/{conversation['primaryCustomer']['email']}"):
+                                os.makedirs(f"attachments/{conversation['primaryCustomer']['email']}")
+
+                            if not os.path.exists(f"attachments/{conversation['primaryCustomer']['email']}/{attachment['filename']}"):
+                                # Attachment data
+                                print(f"Download... size: {attachment['size']}")
+                                r = requests.get(attachment["_links"]['data']['href'], headers=endpoint_headers)
+                                data = r.json()['data']
+                                with open(f"attachments/{conversation['primaryCustomer']['email']}/{attachment['filename']}", "wb") as f:
+                                    f.write(base64.b64decode(data))
+                            else:
+                                print("attachment exists")
+                        
+            if page == conversations['page']['totalPages']:
+                all_conversations = True
+                continue
+            else:
+                page += 1
+                print(f"Page {page} of {conversations['page']['totalPages']}")
+                if end_page:
+                    if page >= end_page:
+                        exit()       
+
+                        
+
+
+
 def main(argv):
     opt_list_mailboxes = False
     opt_export_mailboxes = None
     opt_start_page = False
     opt_end_page = False
     include_attachments = False
+    attachments_only = False
     try:
-        opts, args = getopt.getopt(argv,"le:", ['start=','end='])
+        opts, args = getopt.getopt(argv,"le:", ['start=','end=','attachments', 'attachments-only'])
     except getopt.GetoptError:
         print('-l : list all messageries')
         print('-e id : export id')
@@ -186,6 +297,10 @@ def main(argv):
             opt_start_page = int(arg)
         if (opt == '--end'):
             opt_end_page = int(arg)
+        if (opt == '--attachments'):
+            include_attachments = True
+        if (opt == '--attachments-only'):
+            attachments_only = True
 
     token = authenticate()
 
@@ -201,7 +316,10 @@ def main(argv):
 
 
     if opt_export_mailboxes != None:
-        export_mailboxes(opt_export_mailboxes,endpoint_headers, opt_start_page, opt_end_page, include_attachments) 
+        if attachments_only == True:
+            export_attachments_only(opt_export_mailboxes,endpoint_headers, opt_start_page, opt_end_page)
+        else:
+            export_mailboxes(opt_export_mailboxes,endpoint_headers, opt_start_page, opt_end_page, include_attachments) 
         
 
 if __name__ == "__main__":
